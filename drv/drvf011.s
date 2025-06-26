@@ -22,6 +22,12 @@
 
 DriveAddy = $0300
 
+USE_BLOCK_DMA = 1
+
+STATE_INIT	= 0
+STATE_FAILED	= 1
+STATE_SUCCESS	= 2
+
 dir3Head	= $9c80
 
 _InitForIO:			.word __InitForIO		;9000
@@ -62,6 +68,15 @@ ReadLink:			JMP _ReadLink			;904b
 
 E904E:				.byte $03			;904e
 
+	.byte	0	; filler, wheels version
+				
+SetImageFile:          	; $9050
+	JMP	_SetImageFile 
+SetImageCluster:	; $9053
+	JMP	_SetImageCluster
+GetImageFile:          	; $9056
+	JMP	_GetImageFile 
+
 ; ==============================================================================
 
 evenFlag:		.byte 0
@@ -86,6 +101,7 @@ _ReadBuff:
 __GetBlock:
 	JSR InitForIO
 	JSR ReadBlock
+
 	JSR DoneWithIO
 
 	TXA
@@ -145,7 +161,6 @@ CheckParams:
 	JSR DoCacheVerify
 	BEQ CheckParams_2
 CheckParams_1:
- 	
 	LDA #0				;90dc
 	STA errCount
 	LDX #INV_TRACK
@@ -165,6 +180,10 @@ __OpenDisk:					;90ba
 	STA tmpDriveType
 	AND #%10111111
 	STA _driveType,y
+	
+	lda #128
+	sta curtrk
+	
 	JSR NewDisk
 	bnex OpenDsk1
 	JSR GetDirHead
@@ -286,7 +305,8 @@ SetCurDHVec:
 	LoadW r5, curDirHead		;9230
 	RTS
 
-_Get1stDirEntry:					;9239
+_Get1stDirEntry:			
+		;9239
 	JSR SetDirHead_3
 	INC r1H
 	LoadB borderFlag, 0
@@ -620,20 +640,48 @@ __InitForIO:					;95c6
 	PLA
 	STA tmpPS
 	SEI
+
+	LDA $D030
 	LDA CPU_DATA
 	STA tmpCPU_DATA
 	LoadB CPU_DATA, KRNL_IO_IN
+
+	lda #C65_VIC_INIT1
+	sta $d02f
+	lda #C65_VIC_INIT2
+	sta $d02f
+	
 	LDA grirqen
 	STA tmpgrirqen
 	LDA clkreg
 	STA tmpclkreg
 	LDY #0
 	STY clkreg
+		
 	STY grirqen
 	LDA #%01111111
 	STA grirq
 	STA cia1base+13
 	STA cia2base+13
+.if 1
+	lda #>D_IRQHandler
+	sta irqvec+1
+.if .defined(config128) & (!.defined(mega65))
+	sta nmivec+1
+.endif
+	lda #<D_IRQHandler
+	sta irqvec
+.if .defined(config128) & (!.defined(mega65))
+	sta nmivec
+.endif
+.if (!.defined(config128)) || .defined(mega65)
+	lda #>D_NMIHandler
+	sta nmivec+1
+	lda #<D_NMIHandler
+	sta nmivec
+.endif
+.endif
+	
 	LDA #%00111111
 	STA cia2base+2
 	LDA mobenble
@@ -643,22 +691,95 @@ __InitForIO:					;95c6
 	INY
 	STY cia2base+4
 	
-	; The implementation assumes, that the environment is properly initialized
-	; already, especially VICIII or VICIV enabled, running CPU at 3.5Mhz or
-	; 48Mhz in case of MEGA65
-	;LDA #$A5      ; C65: VIC-III enable sequence
-	;STA $D02F
-	;LDA #$96
-	;STA $D02F     ; C65: VIC-III enabled
-	;lda	#$40
-	;TSB $D031     ; set bit 6 in $D031 to put CPU at 3.5MHz
-	;;lda	#$21
-	;;TSB $D030     ; bank in $C000 interface ROM and remove CIAs from IO map
+	LoadB	imageMounted, STATE_INIT
+.if 0
+	; set or reset floppy bit for drive 1 if needed
+	lda	$D6A1
+	cpy	#DRV_F011_0
+	bne	@1
+	ora	#4	; set drive 1 real floppy
+	sta	$D6A1
+		
+@1:
 	
+	; mount sd if needed
+	cpy	#DRV_SD_81
+	bne	@1b
+	jsr	HyperSave
+	
+	lda control_store
+	ora #$01
+	sta $D080
+	sta control_store
+
+
+	; do mount now, drive 1
+	;; Copy file name
+	ldy #0
+@2:
+	lda TestImageName,y
+	sta $0100,y
+	iny
+	cmp #0
+	bne @2
+	;;  Call dos_setname()
+	ldy #>$0100
+	ldx #<$0100
+	lda #$2E     		; dos_setname Hypervisor trap
+	STA $D640		; Do hypervisor trap
+	NOP			; Wasted instruction slot required following hyper trap instruction
+
+	;; XXX Check for error (carry would be clear)
+
+	lda #$46     		; dos_d81attach1
+	STA $D640		; Do hypervisor trap
+	NOP			; Wasted instruction slot required following hyper trap instruction
+.if 0
+	;lda #$44     		; dos_d81write_en
+	;STA $D640		; Do hypervisor trap
+	;NOP			; Wasted instruction slot required following hyper trap instruction
+.endif
+	lda $d68b		;write enable f011 drive one
+	ora #$24
+	sta $d68b
+
+	jsr	HyperRestore
+
+@3:
+	;bra @3
+.endif	
+@1b:	
 	RTS
+	
+D_IRQHandler:
+.if .defined(config128) &(!.defined(mega65))
+    pla
+    sta $ff00
+.endif
+	pla
+	tay
+	pla
+	tax
+	pla
+D_NMIHandler:
+	rti
 
 __DoneWithIO:
 	SEI
+	ldy	curType
+	cpy	#DRV_F011_1
+	beq	@1a
+	cpy	#DRV_F011_0
+	bne	@1
+@1a:
+	;jsr	_WaitReady
+	lda	control_store
+	and	#%10011111
+	jsr	_ControlReg
+	;jsr _MotorDelay
+	;lda #128
+	;sta curtrk
+@1:
 	LDA tmpclkreg
 	STA clkreg
 	LDA tmpmobenble
@@ -667,52 +788,410 @@ __DoneWithIO:
 	LDA cia2base+13
 	LDA tmpgrirqen
 	STA grirqen
+;.ifndef mega65
+	lda #C65_VIC_INIT1
+	sta $d02f
+	lda #C65_VIC_INIT2
+	sta $d02f
+	lda $d031
+	ora #$40
+	sta $d031
+;.endif	
+;.ifndef mega65
 	LDA tmpCPU_DATA
+	cmp #RAM_64K
+	bne @2
+	lda #IO_IN
+@2:
 	STA CPU_DATA
+	LoadB CPU_DATA, IO_IN
+;.endif
 	LDA tmpPS
 	PHA
 	PLP
 	RTS
 
+_EnsureImageMounted:
+	; after bitstream updates #192 #193
+	; virtual (one drive expected) is using first one found (or none)
+	; floppy (internal or external) is used on and if there is an appropriate drive config
+	; sd mount is used on and if there is an appropriate drive config
+
+	; init state
+	; set or reset floppy bit for drive 1 if needed
+	LoadB	imageMounted, STATE_FAILED
+	ldy	curType
+	LoadB	mountDrive, $FF
+	LoadB	mountCount, 0
+
+	; ======================================================================
+	; match drive 0
+
+	; is drive 0 virtual? (D68A.2)
+	lda	$D68A
+	and	#%00000100
+	beq	@5000
+
+	; are we looking for virtual drive
+	cpy	#DRV_F011_V
+	bne	@6000
+
+	; matched virtual drive
+	jmp	@9002
+
+@5000:
+	; drive 0 not virual, check floppy
+	lda	$D6A1
+	and	#%00000001
+	beq	@5001			; drive 0 is no floppy
+
+	; drive 0 is floppy, check of internal or external
+	cpy	#DRV_SD_81
+	beq	@5020
+	LoadB	mountDrive, 0
+@5020:
+	lda	$D689
+	and	#%00100000
+	bne	@5002			; drive 0 is swapped, so it is external
+
+	; drive 0 is internal floppy
+	cpy	#DRV_F011_0
+	bne	@6000
+
+	bra	@9002
+
+@5002:
+	; drive 0 is external floppy
+	cpy	#DRV_F011_1
+	bne	@6000
+
+	bra	@9002
+
+@5001:
+	; drive 0 is sd mount
+	inc 	mountCount
+	cpy	#DRV_SD_81
+	bne	@6000
+
+	lda	$D68B			; branch if unmounted
+	and	#$01
+	beq	@6000
+
+
+	LoadB	mountDrive, 0
+
+	; check if expected mount
+	; check if something already has been mounted
+	lda 	remountNeeded
+	bmi	@7000
+
+	ldy	#3
+@5007:
+	lda	$D68C,y
+	cmp	currentImageCluster,y
+	bne	@6001
+	dey
+	bpl	@5007
+
+@9002:
+	lda	#0
+	bra	@9000
+
+@6001:	
+	ldy	curType
+
+	; ======================================================================
+	; match drive 1
+@6000:
+	; is drive 1 virtual? (D68A.2)
+	lda	$D68A
+	and	#%00001100
+	beq	@6002
+
+	; are we looking for virtual drive
+	cpy	#DRV_F011_V
+	bne	@7000
+
+	; matched virtual drive
+	bra	@9010
+
+@6002:
+	; drive 1 not virual, check floppy
+	lda	$D6A1
+	and	#%00000100
+	beq	@6011			; drive 1 is no floppy
+
+	; drive 1 is floppy, check of internal or external
+	cpy	#DRV_SD_81
+	beq	@6020
+	LoadB	mountDrive, 1
+@6020:
+
+	lda	$D689
+	and	#%00100000
+	bne	@6003			; drive 1 is swapped, so it is internal
+
+	; drive 1 is external floppy
+	cpy	#DRV_F011_1
+	bne	@7000
+
+	bra	@9010
+
+@6003:
+	; drive 1 is internal floppy
+	cpy	#DRV_F011_0
+	bne	@7000
+
+	bra	@9010
+
+@6011:
+	; drive 1 is sd mount
+	inc 	mountCount
+	cpy	#DRV_SD_81
+	bne	@7000
+	
+	lda	$D68B
+	and	#$02
+	beq	@7000
+
+	LoadB	mountDrive, 1
+
+	; check if expected mount
+	; check if something already has been mounted
+	lda 	remountNeeded
+	bmi	@7000
+
+	ldy	#3
+@6007:
+	lda	$D690,y
+	cmp	currentImageCluster,y
+	bne	@6091
+	dey
+	bpl	@6007
+@9010:
+	lda	#1
+@9000:
+	sta	mountDrive
+	jmp 	@1b
+
+@6091:	
+	ldy	curType
+@7000:
+	; no exact match
+	; was there a candidate drive for reconfiguration/mount?
+	lda	mountDrive
+	cmp	#$FF
+	bne	@7001
+
+	; if floppy and mount count == 0, force drive 1 to be floppy
+	lda	$D689
+	cpy	#DRV_F011_0
+	bne	@7010
+
+	; drive 1 -> floppy, swapped
+	ora	#%00100000
+
+	bra	@7011
+@7010:	
+	cpy	#DRV_F011_1
+	bne	@7004
+
+	; drive 1 -> floppy, unswapped
+	and	#%11101111
+@7011:
+	sta	$D689
+
+	; GS $D6A1.2 F011:DRV2EN Use real floppy drive instead of SD card for 2nd floppy drive
+	lda	$D6A1						; force drive 1 to be floppy
+	ora	#%00000100
+	sta	$D6A1
+
+	lda	#1
+	sta	mountDrive
+	jmp 	@1b
+
+
+	; failed to init a proper drive
+@7004:
+	LoadB	imageMounted, STATE_FAILED
+	ldx 	#NO_SYNC
+	sec
+	rts
+
+@7001:
+	cpy	#DRV_SD_81
+	beq	@7002
+
+	; so it is floppy, let swap and done
+	; GS $D689.5 - F011 swap drive 0 / 1
+	lda	$D689
+	eor	#%00100000
+	sta	$D689
+
+	lda	mountDrive
+	bra	@9000
+
+@7002:
+	; we have to mount anyhow
+	lda	currentImageName
+	beq	@7004
+
+	; mount image
+	jsr	HyperSave
+
+	; do mount now, drive 1
+	;; Copy file name
+	ldy	#0
+@6:
+	lda	currentImageName,y
+	sta	$0100,y
+	iny
+	cmp	#0
+	bne	@6
+	
+	;;  Call dos_setname()
+	ldy	#>$0100
+	ldx	#<$0100
+	lda	#$2E     	; dos_setname Hypervisor trap
+	STA	$D640		; Do hypervisor trap
+	NOP			; Wasted instruction slot required following hyper trap instruction
+
+	;; XXX Check for error (carry would be clear)
+	lda	#$46     	; dos_d81attach1
+	ldy	mountDrive
+	cpy	#1
+	beq	@8000
+	lda	#$40		; dos_d81attach0
+@8000:
+	STA	$D640		; Do hypervisor trap
+	NOP			; Wasted instruction slot required following hyper trap instruction
+
+	bcs	@ok
+@HOHO:
+	inc	$d020
+	bra	@HOHO
+@ok:
+	lda	$d68b
+	ora	#$24
+	sta	$d68b
+
+	; remember cluster
+	ldy	#0
+	sty	remountNeeded
+	ldx	#0
+	lda	mountDrive
+	cmp	#0
+	beq	@8003
+	ldx	#4
+@8003:
+	lda	$D68C,x
+	sta	currentImageCluster,y
+	inx
+	iny	
+	cpy	#4
+	bne	@8003
+@8002:
+	jsr	HyperRestore
+
+@1b:
+	; the hypervisor in new bitstreams changes the buffer, so change it back as we need it
+	lda	$d689			; force to use floppy buffer
+	and	#$7f
+	sta	$d689
+
+	LoadB	imageMounted, STATE_SUCCESS
+
+	lda	control_store
+	and	#$FE
+	ora	mountDrive
+	sta	$D080
+	sta	control_store
+@1:
+	clc
+	rts
+
 _ReadLink:					;98cf
 __ReadBlock:					;98e4
-	JSR CheckParams_1
-	BCC _ReadBlockEnd
 
+	JSR CheckParams_1
+	bcs @1
+	jmp  _ReadBlockEnd
+@1:
 	bbrf 6, curType, _ReadBlockCont1
 	JSR DoCacheRead
-	BNE _ReadBlockEnd
+	BEQ @1b
+	jmp _ReadBlockEnd
+@1b:
 
 _ReadBlockCont1:
 ; Read sector from disk
 	JSR _SetOperation	; set 
-	BCS @1
-	LDA #$01
-	STA $D081
+	BCC @1c
+@1d:
+	jmp _ReadBlockEnd
+@1c:
+	jsr _WaitReady
+	lda #$01
+	sta $D081
+	jsr _WaitReady
 	LDA #$40
 	STA $D081
+	jsr __waitAbit
+
+.if USE_BLOCK_DMA
+	jsr _WaitReady
+.endif	
 @3:
 	LDA $D082
 	AND #$10
 	BNE @2
+.ifndef USE_BLOCK_DMA
 	LDA $D083
 	BPL @3
+.endif
+	bra @1a
 @2:
-@1:
+	sec
+	jmp	_ReadBlockEnd
+@1a:
+
+.ifdef USE_BLOCK_DMA
+	MoveW r4, dmalist_to
+.endif
+
 	LDY #$00		;; read over 256 bytes if needed
 	LDA evenFlag
 	BEQ @4
+
+.ifdef USE_BLOCK_DMA
+	; get second half
+	LoadB dmalist_from+1, $61
+	bra @do_dma
+.else
 @5:
-	JSR _ReadByte		
+	JSR _ReadByteSlow		
 	INY
 	BNE @5
+.endif
 @4:
+.ifdef USE_BLOCK_DMA
+	; get first half
+	LoadB dmalist_from+1, $60
+@do_dma:
+	lda	#>dmalist
+	ldy	#<dmalist
+
+	jsr	_DoDMA
+.else
 @6:
-	JSR _ReadByte		; read our 256 byte sector in the buffer?
+	JSR _ReadByteSlow		; read our 256 byte sector in the buffer?
 	STA (r4L),Y
 	INY
 	BNE @6
-	
+.endif	
+
+	jsr _CheckResult
+	bcs _ReadBlockEnd
 	LDX #0			; no error
 	
 ReadBlockDirBlock:
@@ -752,22 +1231,51 @@ _ReadBlockEnd:
 
 	RTS
 
+.ifdef USE_BLOCK_DMA
+; 0xffd6000L
+
+dmalist:
+	; enchanced dma mode header
+	.byte	$0a
+	.byte	$80, $FF
+	.byte	$81, $00
+	.byte 	0
+	.byte	0	; swap
+	.word	256
+dmalist_from:
+	.word	$6000
+	.byte	$0d				; bank 0
+dmalist_to:
+	.word	DISK_SWAPBASE+DISK_DRV_LGH
+	.byte	0				; bank 1
+	.word	0				; unsued mod
+.endif
+_ReadByteSlow:
+	jsr _ReadByte
+	rts
+
 _ReadByte:
 @1:
+	lda $d082
+	bit #%00001000
+	bne @2
 	LDA $D082
 	AND #$20
 	BNE @1
 	LDA $D087
+@2:
 	RTS
-	
 _WriteByte:
 	STA $D087
 	RTS
-	
+
 _SetOperation:
 
 	JSR _WaitReady
+
+	jsr _EnsureImageMounted
 	
+	bcs @3
 	LDA r1L		; track 1-80
 	DEC
 	STA $D084		; track
@@ -776,9 +1284,9 @@ _SetOperation:
 	CMP #$14		; c set if >= 20
 	LDA #$00
 	ROL
-	EOR #1
+	;EOR #1
 	STA $D086		; side
-	EOR #1
+	;EOR #1
 	BEQ @1
 	LDA #$14
 @1:
@@ -793,9 +1301,192 @@ _SetOperation:
 	ROR
 	STA evenFlag
 	
+	lda curType
+	cmp #DRV_F011_0
+	beq @real
+	cmp #DRV_F011_1
+	bne @2
+
+@real:
+	jsr _InitControl
+	bcs @3
+	jsr _FindTrack
+@2:
 	CLC
 	RTS
+@3:
+	sec
+	rts
+	
+	
+_SideMask:
+	.byte $08, $00
+		
+_InitControl:
+	lda control_store
+	and #$60
+	tay
+	
+	ldx $D086	; side
+	lda _SideMask, x
+	bne @5
+@5:
+	ora #$60	; motor (+led)
+	;ora drive
+	jsr _ControlReg
+	tya
+	bne @4
+	
+	jsr _MotorDelay
+@4:
+	lda #$01	; reset_bp
+	sta $D081
+	jsr _WaitReady
+	dec $D081
+	jsr _WaitReady
+	
+	
+	lda #96		; steprate
+	sta $D089
+	lda #$FF
+	sta $D088
+	
+	; got a disc?
+	lda $D083	;statb
+	and #$01
+	bne @step 
+@6:
+	; seek the Track
+	ldx #0
+	lda curtrk
+	bpl @1
 
+	lda #$10	; stin
+	
+@3:
+	lsr $D082	; stata
+	bcs @2
+	jsr _ExecCommand
+	inx
+	cpx #100	; if drive not present
+			; seeking 100 should not find
+			; track 0 
+	bne @3
+	ldx #DEV_NOT_FOUND
+	bra @err
+@2:
+	jsr _SettleHead
+	lda #0
+	sta curtrk
+@1:
+	clc
+	rts
+@step:
+	; using dskchg/rdy to detect inserted disk
+	; if unready step may force it to enter ready
+	; otherwise no disc is inserted
+	lda #128
+	sta curtrk
+	lda #$10	; stin
+	jsr _ExecCommand
+
+	LDX #$21	; "no formated disk"	
+	lda $D083	;statb
+	and #$01
+	beq @6
+@err:
+	sec
+	rts
+	
+	
+curtrk: 
+	.byte 0
+control_store:
+	.byte 0
+
+; destroys: y, a, x
+_FindTrack:
+	ldy #0
+	lda $D084		; track we want
+@5:
+	jsr _WaitReady
+	cmp curtrk
+	beq @1
+	bcc @3
+	
+	inc curtrk
+	ldy #$18	; stout
+	bra @4
+@3:
+	dec curtrk
+	ldy #$10	; stin
+@4:
+	sty $D081
+	bra @5
+@1:
+	tya
+	beq @2
+	jsr _SettleHead
+@2:
+	rts
+
+_ControlReg:
+	and #$FE
+	pha
+	;jsr _CheckDC
+.if 0
+	lda curType
+	cmp #DRV_F011_V
+	beq @4
+	lda #3
+	bra @5
+@4:
+	lda #2
+@5:
+	tsb $D080	; control
+.endif
+	jsr _WaitReady
+	
+	lda curType
+	cmp #DRV_F011_V
+	beq @2
+	pla
+	ora #1
+	bra @3
+@2:
+	pla
+@3:
+	sta $D080
+	sta control_store 
+	bra _WaitReady
+	
+;_CheckDC:
+	
+;	rts
+	
+_SettleHead:
+	jsr _WaitReady
+	lda #192	; settle rate
+	sta $D089	; step
+	lda #$14	; timer (1 step delay)
+	jsr _ExecCommand
+	jsr _ExecCommand
+	lda #96		; step rate
+	sta $D089	; step
+	jsr _WaitReady
+	rts
+	
+_MotorDelay:
+	ldx #0
+@1:
+	inx 
+	stx $D089	; step
+	lda #$14	; time
+	jsr _ExecCommand
+	cpx #96		; step rate
+	bcc @1
+	rts
+	
 _ExecCommand:
 	STA $D081
 _WaitReady:
@@ -827,6 +1518,16 @@ _DriveReady:
 	SEC
 	RTS
 	
+__waitAbit:
+	ldy #$28
+	ldx #0
+@aa:
+	DEX
+	bne @aa
+	dey
+	bne @aa
+	jmp _WaitReady
+
 __WriteBlock:					;9960
 	JSR CheckParams
 	BCC _WriteBlockEnd
@@ -837,45 +1538,58 @@ __WriteBlock:					;9960
 	JSR _SetOperation		; set track, side, sector
 	BCS _WriteBlockEnd
 	
+	ldx #WR_PR_ON
 	JSR _DriveReady		; drive ready, not wrote protect
 	BCS _WriteBlockEnd
 	
-	LDA #$40
+	lda #$01
+	sta $D081
+	jsr _WaitReady
+
+	LDA #$46
 	JSR _ExecCommand		; execute read	
+
 	JSR _CheckResult		; test if read succeeded
 	BCS _WriteBlockEnd
-	
-	LDY #$00		; skip first 256 bytes if needed
-	LDA evenFlag
-	BEQ @1
-@2:
-	JSR _ReadByte	; read byte without checking if available
-	INY	
-	BNE @2	
+
+	lda $D080
+	LDY evenFlag
+	BEQ @111
+	ora #%00010000		;		second: set F011C's 'swap' flag
+	bra @112
+@111:	and #%11101111		;		first: clear F011C's 'swap' flag	[910417]
+@112:
+	sta $D080		;	   (but don't affect control_store!)
+	jsr _WaitReady
+
+	ldy #0
 @1:
 	LDA (r4),Y		; write our 256 byte buffer
 	JSR _WriteByte
 	INY
 	BNE @1
-@4:
-	LDA $D082		; read up rest of the buffer
-	AND #$20
-	BNE @3
-	JSR _ReadByte 	; read byte without checking if available
-	BRA @4
-@3:
+
+	lda $D080
+	and #%11101111		; Reset chip buffer pointers
+	sta $D080		; control
+	lda #$01
+	sta $D081
+
 	LDA #$80
 	JSR _ExecCommand 		; write sector
+	JSR _CheckResult  	; Test wether read or write succeed?
+
 
 	; read back written sector
 	; here we use this not for checking but to ensure the 
 	; the next read will be alined, strange
 	; TODO: double check why this fails on mega65 if reading
 	; the next blick straigt after write command
-	LDA #$40	; read command
-	JSR _ExecCommand	; execute FDC command
-	JSR _CheckResult  	; Test wether read or write succeed?
-	
+.if 1
+	;LDA #$40	; read command
+	;JSR _ExecCommand	; execute FDC command
+	;JSR _CheckResult  	; Test wether read or write succeed?
+.endif
 	LDX	#0
 	
 _WriteBlockEnd:
@@ -887,6 +1601,15 @@ __VerWriteBlock: 				;998f
 	LDX #0
 	bbrf 6, curType, VWrBlock3
 	JMP DoCacheWrite
+
+_DoDMA:
+	sta	$d701
+	lda	#0
+	sta	$d702
+	sta 	$d704	;	enhanced bank
+	sty	$d705
+	; fallthrough
+
 VWrBlock3:
 	RTS				;9886
 
@@ -895,6 +1618,11 @@ __ChangeDiskDevice:
 	STA curDevice
 
 __EnterTurbo:
+        ;lda     curDrive                        ; 957B AD 89 84                 ...
+        ;jsr     SetDevice                       ; 957E 20 B0 C2                  ..
+        ;ldx     #$00                            ; 9581 A2 00                    ..
+        ;rts                                     ; 9583 60                       `
+
 __NewDisk:
 __PurgeTurbo:
 __ExitTurbo:	
@@ -1006,6 +1734,102 @@ E9C4C:
 	BNE E9C4C
 	RTS
 
+HyperSave:
+	ldx #0
+@1:
+	lda $CE00,x
+	sta HyperBuffer, x
+	inx
+	bne @1
+	rts
+
+HyperRestore:
+	ldx #0
+@1:
+	lda HyperBuffer, x
+	sta $CE00,x
+	inx
+	bne @1
+	rts
+
+imageMounted:
+	.byte	0		; TRUE (!= 0) if mount
+				; has been resolved after
+				; InitForIO or change
+				; of image/cluster configuration
+
+_SetImageFile:
+	ldx	#r0
+	LoadW	r1, currentImageName
+	ldy	#r1
+	jsr	CopyString
+	LoadW	currentImageCluster, $FFFF
+	LoadW	currentImageCluster+2, $FFFF
+	sta	remountNeeded
+	LoadB	imageMounted, 0
+	jmp	_SaveDriver
+	
+_SetImageCluster:
+	MoveW	r0, currentImageCluster
+	MoveW	r1, currentImageCluster+2
+	LoadB	imageMounted, 0
+	lda	#0
+	sta	remountNeeded
+	sta	currentImageName
+	jmp	_SaveDriver
+	
+_GetImageFile:
+	LoadW	r0, currentImageName
+	rts
+	
+driverRAMStartLow:
+	.byte	<($8300)
+	.byte	<($8300+DISK_DRV_LGH)
+	.byte	<($8300+DISK_DRV_LGH*2)
+	.byte	<($8300+DISK_DRV_LGH*3)
+driverRAMStartHigh:
+	.byte	>($8300)
+	.byte	>($8300+DISK_DRV_LGH)
+	.byte	>($8300+DISK_DRV_LGH*2)
+	.byte	>($8300+DISK_DRV_LGH*3)
+
+_SaveDriver:
+	; save driver with the current properties
+	lda	sysRAMFlg
+	bit	#64
+	beq	@1	; branch if driver is not stored in RAM
+	
+	LoadW	r0, DISK_BASE
+	ldx	curDrive
+	lda	driverRAMStartLow-8,x
+	sta	r1L
+	lda	driverRAMStartHigh-8,x
+	sta	r1H
+	LoadW	r2, DISK_DRV_LGH
+	LoadB	r3L, 0
+	jsr	StashRAM
+@1:
+	rts
+	
+currentImageCluster:
+	.word	$FFFF		; illegal cluster number
+				; for disc image
+	.word	$FFFF
+currentImageName:
+	.repeat 64
+		.byte 0
+	.endrep
+mountDrive:
+	.byte	0
+mountCount:
+	.byte	0
+remountNeeded:
+	.byte	$FF
+HyperBuffer:
+	.repeat 256
+		.byte 0
+	.endrep
+	
 tmpclkreg:
 	.byte 0				;9c55
 tmpPS:			
@@ -1028,7 +1852,4 @@ E9C64:
 borderFlag:		
 	.byte 0				;9c65
 
-cname:  
-	.byte "#"
-cname_end:
-
+.assert * <= $9C80, error, "Driver code and data need to end before $9C80"
