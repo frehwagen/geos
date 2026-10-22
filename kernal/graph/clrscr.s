@@ -14,14 +14,30 @@
 
 .import i_Rectangle
 .import SetPattern
+.import SerialNumber
 
 .global ClrScr
+
+
 
 .ifndef wheels
 ;---------------------------------------------------------------
 ; used by EnterDesktop
 ;---------------------------------------------------------------
 ClrScr:
+.ifdef mega65
+	ldx #$41
+	lda graphMode
+	bmi @2
+	asl
+	bmi @1
+	dex
+@2:
+	stx graphMode
+
+@1:
+	LoadB dispBufferOn, ST_WR_FORE
+.else
 .ifdef bsw128
 	LoadB dispBufferOn, ST_WR_FORE | ST_WR_BACK
 	bbsf 7, graphMode, @4
@@ -57,16 +73,29 @@ ClrScr:
 .endif
 	dex
 	bne @1
+	stx SerialNumber
+	stx SerialNumber+1
 	rts
-
-.ifdef bsw128
+.endif
+.if .defined(bsw128) || .defined(mega65)
 @4:	lda #2
 	jsr SetPattern
 	jsr i_Rectangle
+.ifdef scalable_coords
+	ByteCY	0, 0
+	ByteCY	SC_FROM_END|0, SC_FROM_END|0
+	WordCX	0, 0
+	WordCX  SC_FROM_END|0, SC_FROM_END|0
+.else
+
 	.byte 0   ; y1
-	.byte SC_PIX_HEIGHT-1 ; y2
+	.byte <SC_FROM_END ;SC_PIX_HEIGHT-1 ; y2
 	.word 0   ; x1
 	.word SCREENPIXELWIDTH-1 ; x2
+.endif
+	ldx #0
+	stx SerialNumber
+	stx SerialNumber+1
 	rts
 .endif
 

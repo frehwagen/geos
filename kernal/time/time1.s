@@ -14,12 +14,21 @@
 .import pingTabEnd
 .import alarmWarnFlag
 .import dateCopy
+.import MapUnderlay
+.import UnmapUnderlay
 
 .global _DoUpdateTime
 
 .segment "time1"
-
 _DoUpdateTime:
+    jsr MapUnderlay
+    jsr __DoUpdateTime
+    jmp UnmapUnderlay
+
+
+.segment "time1b"
+
+__DoUpdateTime:
 	sei
 	START_IO_X
 	lda cia1base+15
@@ -65,7 +74,8 @@ _DoUpdateTime:
 	beq @5
 	jmp (alarmTmtVector)
 @5:	bbrf 6, alarmSetFlag, @6
-	jsr DoClockAlarm
+	; TODO
+	;jsr DoClockAlarm
 @6:	cli
 	rts
 
@@ -142,6 +152,8 @@ ConvertBCD:
 @2:	rts
 
 DoClockAlarm:
+; TODO, bring back to life in the underlay
+.if 0
 	lda alarmWarnFlag
 	bne @3
 .ifdef bsw128
@@ -167,5 +179,6 @@ DoClockAlarm:
 	lda #$1e
 	sta alarmWarnFlag
 	dec alarmSetFlag
-@3:	rts
-
+@3:
+	rts
+	.endif

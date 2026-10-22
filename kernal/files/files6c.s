@@ -17,6 +17,9 @@
 .import _SwapDiskDriver
 .import CheckAppCompat
 .endif
+.ifdef mega65
+.import _SwapDiskDriver
+.endif
 
 .import GetBlock
 .import FetchRAM
@@ -42,6 +45,26 @@ _FindFile:
 @2:	ldy #0
 	lda (r5),y
 	beq @5
+.ifdef mega65
+	PushW r7
+	LoadW r7, 0
+	ldy #3
+@3:
+	tyz
+	EOM
+	lda (r6),Z
+	beq @4a
+	cmp (r5),y
+	bne @5a
+	iny
+	bne @3
+	beq @4a
+@5a:
+	PopW r7
+	bra @5
+@4a:
+	PopW r7
+.else
 	ldy #3
 @3:	lda (r6),y
 	beq @4
@@ -49,6 +72,7 @@ _FindFile:
 	bne @5
 	iny
 	bne @3
+.endif
 @4:	cpy #OFF_FNAME + $10
 	beq @6
 	lda (r5),y
@@ -70,12 +94,39 @@ _FindFile:
 .else
 	php
 	sei
+.ifndef mega65
 	SubVW 3, r6
+.endif
 	jsr Get1stDirEntry
 	bnex @7
 @1:	ldy #OFF_CFILE_TYPE
 	lda (r5),y
 	beq @4
+
+.ifdef mega65
+	PushW r7
+	PushW r6
+	LoadW r7, 0
+	ldy #3
+	ldz #0
+@3a:
+	EOM
+	lda (r6),Z
+	beq @4a
+	cmp (r5),y
+	bne @5a
+	IncW r6
+	iny
+	bne @3a
+	beq @4a
+@5a:
+	PopW r6
+	PopW r7
+	bra @4
+@4a:
+	PopW r6
+	PopW r7
+.else
 	ldy #OFF_FNAME
 @2:	lda (r6),y
 	beq @3
@@ -83,6 +134,7 @@ _FindFile:
 	bne @4
 	iny
 	bne @2
+.endif
 @3:	cpy #OFF_FNAME + $10
 	beq @5
 	lda (r5),y
@@ -174,6 +226,8 @@ IsDeviceValid:
 	bcc @1
 	cmp #12
 	bcs @1
+	lda curType 
+	beq @1
 	jsr ExitTurbo
 @1:	PopB curDevice
 @2:	cmp #8
@@ -183,13 +237,14 @@ IsDeviceValid:
 	tay
 	lda _driveType,y
 	sta curType
-.ifdef bsw128
+	;beq @7
+.if .defined(bsw128)
 	ldx curDrive
 .endif
 	cpy curDrive
 	beq @3
 	sty curDrive
-.ifdef bsw128
+.if .defined(bsw128)
 	bbrf 6, sysRAMFlg, @4
 .else
 	bbrf 6, sysRAMFlg, @3
@@ -203,13 +258,15 @@ IsDeviceValid:
 	jsr PrepForFetch
 @3:	ldx #NULL
 	rts
-.ifdef bsw128
+.if .defined(bsw128)
 @4:	txa
 	eor curDrive
 	and #1
 	beq @5
-	jsr _SwapDiskDriver
+	;jsr _SwapDiskDriver
 @5:	ldx #$00
+	rts
+@7:	ldx #DEV_NOT_FOUND
 	rts
 .endif
 
@@ -338,4 +395,3 @@ GetHeaderFileName:
 	rts
 @3:	ldy #$ff
 @4:	rts
-
