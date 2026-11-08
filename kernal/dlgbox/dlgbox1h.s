@@ -171,7 +171,13 @@ DBDoGETFILES:
 .ifdef wheels_dlgbox_features ; ???
 	addv 4
 .else
+	bit graphMode
+	bpl @2b
+	addv 14		; by 2 for the 640x200 resolution
+	bra @2c
+@2b:
 	addv 7
+@2c:
 .endif
 	pha
 	lda r2H
@@ -280,15 +286,22 @@ DBGFilesHelp1:
 .endif
 
 DBGFilesArrowsIcons:
+.ifdef mega65
+	; the picture lives in the underlay; BitmapUp reads pointers with
+	; this flag (any pointer >= $C000) from the underlay bank
+	.word DBGFArrowPic | $4000
+.else
 	.word DBGFArrowPic
+.endif
 DBGFArrowX:
 	.word 0
 .ifdef wheels_dlgbox_features
 	.byte 8, 8
 .elseif .defined(bsw128)
 	.byte DOUBLE_B | 3, 12
+.elseif .defined(mega65)
+	.byte DOUBLE_B | 3, 12
 .else
 	.byte 3, 12
 .endif
 	.word DBGFDoArrow
-
